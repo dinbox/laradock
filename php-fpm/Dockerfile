@@ -12,14 +12,20 @@
 # Note: Base Image name format {image-tag}-{php-version}
 #
 
-ARG PHP_VERSION=${PHP_VERSION}
+ARG LARADOCK_PHP_VERSION
 
-FROM laradock/php-fpm:2.2-${PHP_VERSION}
+FROM laradock/php-fpm:2.2-${LARADOCK_PHP_VERSION}
 
 LABEL maintainer="Mahmoud Zalt <mahmoud@zalt.me>"
 
+ARG LARADOCK_PHP_VERSION
+
+# Set Environment Variables
+ENV DEBIAN_FRONTEND noninteractive
+
 # always run apt update when start and after add new source list, then clean up at end.
 RUN apt-get update -yqq && \
+    apt-get install -y apt-utils && \
     pecl channel-update pecl.php.net
 
 #
@@ -43,6 +49,23 @@ RUN apt-get update -yqq && \
 # Example:
 #   - INSTALL_ZIP_ARCHIVE=true
 #
+
+###########################################################################
+# SSH2:
+###########################################################################
+
+ARG INSTALL_SSH2=false
+
+RUN if [ ${INSTALL_SSH2} = true ]; then \
+    # Install the ssh2 extension
+    apt-get -y install libssh2-1-dev && \
+    if [ $(php -r "echo PHP_MAJOR_VERSION;") = "5" ]; then \
+        pecl install -a ssh2-0.13; \
+    else \
+        pecl install -a ssh2-1.1.2; \
+    fi && \
+    docker-php-ext-enable ssh2 \
+;fi
 
 ###########################################################################
 # SOAP:
@@ -101,6 +124,21 @@ RUN if [ ${INSTALL_XDEBUG} = true ]; then \
 # Copy xdebug configuration for remote debugging
 COPY ./xdebug.ini /usr/local/etc/php/conf.d/xdebug.ini
 
+RUN sed -i "s/xdebug.remote_autostart=0/xdebug.remote_autostart=1/" /usr/local/etc/php/conf.d/xdebug.ini && \
+    sed -i "s/xdebug.remote_enable=0/xdebug.remote_enable=1/" /usr/local/etc/php/conf.d/xdebug.ini && \
+    sed -i "s/xdebug.cli_color=0/xdebug.cli_color=1/" /usr/local/etc/php/conf.d/xdebug.ini
+
+###########################################################################
+# Phpdbg:
+###########################################################################
+
+ARG INSTALL_PHPDBG=false
+
+RUN if [ ${INSTALL_PHPDBG} = true ]; then \
+    # Load the xdebug extension only with phpunit commands
+    apt-get install -y --force-yes php${LARADOCK_PHP_VERSION}-phpdbg \
+;fi
+
 ###########################################################################
 # Blackfire:
 ###########################################################################
@@ -139,7 +177,11 @@ RUN if [ ${INSTALL_SWOOLE} = true ]; then \
     if [ $(php -r "echo PHP_MAJOR_VERSION;") = "5" ]; then \
       pecl install swoole-2.0.11; \
     else \
-      pecl install swoole; \
+      if [ $(php -r "echo PHP_MINOR_VERSION;") = "0" ]; then \
+        pecl install swoole-2.2.0; \
+      else \
+        pecl install swoole; \
+      fi \
     fi && \
     docker-php-ext-enable swoole \
 ;fi
@@ -152,6 +194,10 @@ ARG INSTALL_MONGO=false
 
 RUN if [ ${INSTALL_MONGO} = true ]; then \
     # Install the mongodb extension
+    if [ $(php -r "echo PHP_MAJOR_VERSION;") = "5" ]; then \
+      pecl install mongo && \
+      docker-php-ext-enable mongo \
+    ;fi && \
     pecl install mongodb && \
     docker-php-ext-enable mongodb \
 ;fi
@@ -176,6 +222,8 @@ RUN if [ ${INSTALL_AMQP} = true ]; then \
 ARG INSTALL_ZIP_ARCHIVE=false
 
 RUN if [ ${INSTALL_ZIP_ARCHIVE} = true ]; then \
+    apt-get install libzip-dev -y && \
+    docker-php-ext-configure zip --with-libzip && \
     # Install the zip extension
     docker-php-ext-install zip \
 ;fi
@@ -185,7 +233,7 @@ RUN if [ ${INSTALL_ZIP_ARCHIVE} = true ]; then \
 ###########################################################################
 
 ARG INSTALL_PCNTL=false
-RUN if [ ${INSTALL_PCNTL} = true]; then \
+RUN if [ ${INSTALL_PCNTL} = true ]; then \
     # Installs pcntl, helpful for running Horizon
     docker-php-ext-install pcntl \
 ;fi
@@ -373,23 +421,33 @@ RUN if [ ${INSTALL_LDAP} = true ]; then \
 ARG INSTALL_MSSQL=false
 
 RUN set -eux; if [ ${INSTALL_MSSQL} = true ]; then \
-    ###########################################################################
-    # Ref from https://github.com/Microsoft/msphpsql/wiki/Dockerfile-for-adding-pdo_sqlsrv-and-sqlsrv-to-official-php-image
-    ###########################################################################
-    # Add Microsoft repo for Microsoft ODBC Driver 13 for Linux
-    apt-get install -y apt-transport-https gnupg \
-    && curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
-    && curl https://packages.microsoft.com/config/debian/8/prod.list > /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update -yqq \
-    # Install Dependencies
-    && ACCEPT_EULA=Y apt-get install -y unixodbc unixodbc-dev libgss3 odbcinst msodbcsql locales \
-    && echo "en_US.UTF-8 UTF-8" > /etc/locale.gen \
-    && locale-gen \
-    # Install pdo_sqlsrv and sqlsrv from PECL. Replace pdo_sqlsrv-4.1.8preview with preferred version.
-    && pecl install pdo_sqlsrv-4.1.8preview sqlsrv-4.1.8preview \
-    && docker-php-ext-enable pdo_sqlsrv sqlsrv \
-    && php -m | grep -q 'pdo_sqlsrv' \
-    && php -m | grep -q 'sqlsrv' \
+    if [ $(php -r "echo PHP_MAJOR_VERSION;") = "5" ]; then \
+      apt-get -y install freetds-dev libsybdb5 \
+      && ln -s /usr/lib/x86_64-linux-gnu/libsybdb.so /usr/lib/libsybdb.so \
+      && docker-php-ext-install mssql pdo_dblib \
+      && php -m | grep -q 'mssql' \
+      && php -m | grep -q 'pdo_dblib' \
+    ;else \
+      ###########################################################################
+      # Ref from https://github.com/Microsoft/msphpsql/wiki/Dockerfile-for-adding-pdo_sqlsrv-and-sqlsrv-to-official-php-image
+      ###########################################################################
+      # Add Microsoft repo for Microsoft ODBC Driver 13 for Linux
+      apt-get install -y apt-transport-https gnupg \
+      && curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
+      && curl https://packages.microsoft.com/config/debian/9/prod.list > /etc/apt/sources.list.d/mssql-release.list \
+      && apt-get update -yqq \
+      # Install Dependencies
+      && ACCEPT_EULA=Y apt-get install -y unixodbc unixodbc-dev libgss3 odbcinst msodbcsql17 locales \
+      && echo "en_US.UTF-8 UTF-8" > /etc/locale.gen \
+      # link local aliases
+      && ln -sfn /etc/locale.alias /usr/share/locale/locale.alias \
+      && locale-gen \
+      # Install pdo_sqlsrv and sqlsrv from PECL. Replace pdo_sqlsrv-4.1.8preview with preferred version.
+      && pecl install pdo_sqlsrv sqlsrv \
+      && docker-php-ext-enable pdo_sqlsrv sqlsrv \
+      && php -m | grep -q 'pdo_sqlsrv' \
+      && php -m | grep -q 'sqlsrv' \
+    ;fi \
 ;fi
 
 ###########################################################################
@@ -401,7 +459,7 @@ USER root
 ARG INSTALL_IMAGE_OPTIMIZERS=false
 
 RUN if [ ${INSTALL_IMAGE_OPTIMIZERS} = true ]; then \
-    apt-get install -y --force-yes jpegoptim optipng pngquant gifsicle \
+    apt-get install -y jpegoptim optipng pngquant gifsicle \
 ;fi
 
 ###########################################################################
@@ -432,12 +490,35 @@ RUN if [ ${INSTALL_IMAP} = true ]; then \
 ;fi
 
 ###########################################################################
+# Calendar:
+###########################################################################
+
+USER root
+
+ARG INSTALL_CALENDAR=false
+
+RUN if [ ${INSTALL_CALENDAR} = true ]; then \
+    docker-php-ext-configure calendar && \
+    docker-php-ext-install calendar \
+;fi
+
+###########################################################################
+# libfaketime:
+###########################################################################
+
+USER root
+
+ARG INSTALL_FAKETIME=false
+
+RUN if [ ${INSTALL_FAKETIME} = true ]; then \
+    apt-get install -y libfaketime \
+;fi
+
+###########################################################################
 # Check PHP version:
 ###########################################################################
 
-ARG PHP_VERSION=${PHP_VERSION}
-
-RUN php -v | head -n 1 | grep -q "PHP ${PHP_VERSION}."
+RUN php -v | head -n 1 | grep -q "PHP ${LARADOCK_PHP_VERSION}."
 
 #
 #--------------------------------------------------------------------------
@@ -456,6 +537,12 @@ RUN apt-get clean && \
     rm /var/log/lastlog /var/log/faillog
 
 RUN usermod -u 1000 www-data
+
+# Adding the faketime library to the preload file needs to be done last
+# otherwise it will preload it for all commands that follow in this file
+RUN if [ ${INSTALL_FAKETIME} = true ]; then \
+    echo "/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1" > /etc/ld.so.preload \
+;fi
 
 WORKDIR /var/www
 
